@@ -142,122 +142,6 @@ class Attention(nn.Module):
            x = self.proj_drop(x)
         return x
 
-class CrossAttention(nn.Module):
-    """标准交叉注意力：Query模态关注Key-Value模态"""
-    def __init__(self, dim, num_heads=8, dropout=0.1):
-        super().__init__()
-        self.num_heads = num_heads
-        self.scale = (dim // num_heads) ** -0.5
-        
-        # Query投影
-        self.q_proj = nn.Linear(dim, dim)
-        # Key-Value投影
-        self.k_proj = nn.Linear(dim, dim)
-        self.v_proj = nn.Linear(dim, dim)
-        
-        # 输出投影
-        self.out_proj = nn.Linear(dim, dim)
-        
-        # 归一化和Dropout
-        self.norm = nn.LayerNorm(dim)
-        self.dropout = nn.Dropout(dropout)
-        self.attn_dropout = nn.Dropout(dropout)
-        
-    def forward(self, query_tokens, kv_tokens):
-        """
-        交叉注意力：query关注kv
-        参数:
-            query_tokens: [B, N_q, D] - Query模态的token
-            kv_tokens: [B, N_kv, D] - Key-Value模态的token
-        返回:
-            [B, N_q, D] - 增强后的Query表示
-        """
-        B, N_q, D = query_tokens.shape
-        N_kv = kv_tokens.shape[1]
-        
-        # 1. 线性投影
-        Q = self.q_proj(query_tokens)  # [B, N_q, D]
-        K = self.k_proj(kv_tokens)     # [B, N_kv, D]
-        V = self.v_proj(kv_tokens)     # [B, N_kv, D]
-        
-        # 2. 多头处理
-        Q = Q.view(B, N_q, self.num_heads, D//self.num_heads).transpose(1, 2)  # [B, H, N_q, D_h]
-        K = K.view(B, N_kv, self.num_heads, D//self.num_heads).transpose(1, 2) # [B, H, N_kv, D_h]
-        V = V.view(B, N_kv, self.num_heads, D//self.num_heads).transpose(1, 2) # [B, H, N_kv, D_h]
-        
-        # 3. 注意力计算
-        attn_scores = (Q @ K.transpose(-2, -1)) * self.scale  # [B, H, N_q, N_kv]
-        attn_probs = attn_scores.softmax(dim=-1)
-        attn_probs = self.attn_dropout(attn_probs)
-        
-        # 4. 注意力加权
-        attended = attn_probs @ V  # [B, H, N_q, D_h]
-        
-        # 5. 合并多头
-        attended = attended.transpose(1, 2).contiguous().view(B, N_q, D)  # [B, N_q, D]
-        
-        # 6. 输出投影和残差连接
-        output = self.out_proj(attended)
-        output = self.dropout(output)
-        output = self.norm(query_tokens + output)  # 残差连接
-        
-        return output
-
-class GatedBidirectionalCrossAttention(nn.Module):
-    """带门控融合的双向交叉注意力"""
-    def __init__(self, dim, num_heads=8, dropout=0.1):
-        super().__init__()
-        
-        # 双向交叉注意力
-        self.vis_to_tac = CrossAttention(dim, num_heads, dropout)
-        self.tac_to_vis = CrossAttention(dim, num_heads, dropout)
-        
-        # 门控融合层：生成两个独立的权重
-        self.gate_layer = nn.Sequential(
-            nn.Linear(dim * 2, dim),  # 输入是拼接的特征
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(dim, 2),  # 输出两个权重
-            nn.Softmax(dim=-1)  # 在最后一个维度做softmax，和为1
-        )
-        
-        self.norm = nn.LayerNorm(dim)
-        
-    def forward(self, visual_tokens, tactile_tokens):
-        """
-        双向交叉注意力 + 门控融合
-        参数:
-            visual_tokens: [B, N, D]
-            tactile_tokens: [B, N, D]
-        返回:
-            [B, N, D] - 门控融合后的特征
-        """
-        B, N, D = visual_tokens.shape
-        
-        # 1. 双向交叉注意力
-        vis_enhanced = self.vis_to_tac(visual_tokens, tactile_tokens)  # [B, N, D]
-        tac_enhanced = self.tac_to_vis(tactile_tokens, visual_tokens)  # [B, N, D]
-        
-        # 2. 计算门控权重
-        # 拼接特征用于计算权重
-        concat_features = torch.cat([vis_enhanced, tac_enhanced], dim=-1)  # [B, N, 2D]
-        
-        # 计算门控权重 - 输出两个值，和为1
-        gate_weights = self.gate_layer(concat_features)  # [B, N, 2]
-        
-        # 分离权重
-        vis_weight = gate_weights[..., 0:1]  # [B, N, 1]
-        tac_weight = gate_weights[..., 1:2]  # [B, N, 1]
-        
-        # 3. 加权融合
-        fused = vis_weight * vis_enhanced + tac_weight * tac_enhanced  # [B, N, D]
-        
-        # 4. 残差连接（可选）
-        # 可以添加一个残差连接从原始输入
-        # fused = self.norm(fused + visual_tokens)  # 或 + tactile_tokens
-        
-        return fused
-
 class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
@@ -365,21 +249,7 @@ class TimeSFormer(nn.Module):
             img_size=Visual_img_size, patch_size=Visual_patch_size, in_chans=in_chans, embed_dim=embed_dim)
         self.patch_embed_tactile = PatchEmbed(
             img_size=Tactile_img_size, patch_size=Tactile_patch_size, in_chans=in_chans, embed_dim=embed_dim)
-        # =============== 新增：门控双向交叉注意力模块 ===============
-        # 捏动作的视觉-触觉融合
-        self.cross_attention_pinch = GatedBidirectionalCrossAttention(
-            dim=embed_dim, 
-            num_heads=num_heads//2,  # 使用一半的注意力头
-            dropout=drop_rate
-        )
-        
-        # 滑动作的视觉-触觉融合
-        self.cross_attention_slide = GatedBidirectionalCrossAttention(
-            dim=embed_dim,
-            num_heads=num_heads//2,
-            dropout=drop_rate
-        )
-        # =============== 新增结束 ===============
+
         num_patches_visual = self.patch_embed_visual.num_patches
         num_patches_tactile = self.patch_embed_tactile.num_patches
 
@@ -417,7 +287,7 @@ class TimeSFormer(nn.Module):
         self.act_fc1 = nn.Linear(1, 8)  # action(1 * 2; gripper & ratio) -> 1 * 16
         self.act_fc2 = nn.Linear(8, 20)  # action(1 * 2) -> 1 * 16
 
-        self.fusion = nn.Linear(2*embed_dim,40)
+        self.fusion = nn.Linear(4*embed_dim,40)
         self.pred1 = nn.Linear(60, 30)
         self.pred2 = nn.Linear(30, 15)
         #Classifier head
@@ -519,7 +389,7 @@ class TimeSFormer(nn.Module):
             x = torch.mean(x, 1) # averaging predictions for every frame
 
         x = self.norm(x)
-        return x[:, 1:]
+        return x[:, 0]
 
     def forward_features_tactile(self, x):
         #print(x.shape)
@@ -573,7 +443,7 @@ class TimeSFormer(nn.Module):
             x = torch.mean(x, 1) # averaging predictions for every frame
 
         x = self.norm(x)
-        return x[:, 1:]
+        return x[:, 0]
 
     # x1 -> visual pinching
     # x2 -> visual sliding
@@ -586,26 +456,13 @@ class TimeSFormer(nn.Module):
             y1 = y1.to('cuda')
             y2 = y2.to('cuda')
             thresh = thresh.to('cuda')
-        # 1. 提取视觉和触觉特征（返回所有非CLS token）
-        x1_tokens = self.forward_features_visual(x1)  # [B, N_vis, D]
-        x2_tokens = self.forward_features_visual(x2)  # [B, N_vis, D]
-        y1_tokens = self.forward_features_tactile(y1) # [B, N_tac, D]
-        y2_tokens = self.forward_features_tactile(y2) # [B, N_tac, D]
-        
-        # =============== 新增：门控双向交叉注意力融合 ===============
-        # 捏动作：视觉和触觉融合
-        pinch_fused = self.cross_attention_pinch(x1_tokens, y1_tokens)  # [B, N_vis, D]
-        
-        # 滑动作：视觉和触觉融合
-        slide_fused = self.cross_attention_slide(x2_tokens, y2_tokens)  # [B, N_vis, D]
-        
-        # 池化得到全局特征
-        pinch_pooled = pinch_fused.mean(dim=1)  # [B, D]
-        slide_pooled = slide_fused.mean(dim=1)  # [B, D]
-        
-        # 拼接两种动作的特征
-        fused = torch.cat((pinch_pooled, slide_pooled), dim=-1)  # [B, 2*D]
-        # =============== 新增结束 ===============
+        x1 = self.forward_features_visual(x1) 
+        x2 = self.forward_features_visual(x2) 
+        y1 = self.forward_features_tactile(y1)
+        y2 = self.forward_features_tactile(y2)
+        pinching = torch.cat((x1,y1),dim=-1)
+        sliding = torch.cat((x2,y2),dim=-1)
+        fused = torch.cat((pinching, sliding), dim=-1)
         fused = self.fusion(fused)
         embed_act = self.act_fc1(thresh)
         embed_act = F.leaky_relu(embed_act)
