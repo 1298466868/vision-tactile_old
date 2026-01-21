@@ -21,8 +21,8 @@ Model_name: timeSformer_orig_two # place with your model name
 Modality: Combined # For grasping framwork, we only used Combined
 base_network: resnet18 # only used for the basic_CNN architecture, there are some other options
 # vgg_19; inception_v3; alexnet(debug)
-attn_drop: 0.2  # used for timeSformer_orig_two & vivit_fdp_two
-mlp_drop: 0.2 # used for timeSformer_orig_two & vivit_fdp_two
+attn_drop: 0  # used for timeSformer_orig_two & vivit_fdp_two
+mlp_drop: 0 # used for timeSformer_orig_two & vivit_fdp_two
 CNN_drop: 0.3 # used for basic_CNN
 LSTM_drop: 0.3 # used for basic_CNN
 pretrained: False # used for basic_CNN, load pretrained model or not.
@@ -34,6 +34,7 @@ use_random_seed: 0  #Set to 1 to use random seed. Otherwise, seed below is used 
 seed: 42 #Only used if use_random_seed = 1
 skip_init_in_train: 1
 test_eval: 1
+
 
 
 
